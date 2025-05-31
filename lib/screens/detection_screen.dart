@@ -7,6 +7,9 @@ import 'dart:async';
 import 'dart:typed_data';
 import '../utils/ar_overlay_painter.dart';
 import '../utils/image_processor.dart';
+import 'driver_profile_screen.dart';
+import 'detection_history_screen.dart';
+import 'emergency_data_screen.dart';
 
 class DetectionScreen extends StatefulWidget {
   const DetectionScreen({Key? key}) : super(key: key);
@@ -59,14 +62,25 @@ class _DetectionScreenState extends State<DetectionScreen>
 
   Future<void> _loadModelAndLabels() async {
     try {
-      // Carga modelo
-      _interpreter =
-          await Interpreter.fromAsset('modelo_somnolencia_4clases.tflite');
+      debugPrint('Iniciando carga del modelo...');
+
+      // Verificar que el archivo existe usando una ruta más específica
+      final modelFile = await DefaultAssetBundle.of(context)
+          .load('assets/modelo_somnolencia_4clases.tflite');
+      debugPrint(
+          'Tamaño del archivo del modelo: ${modelFile.lengthInBytes} bytes');
+
+      // Carga modelo usando la ruta completa
+      _interpreter = await Interpreter.fromAsset(
+          'assets/modelo_somnolencia_4clases.tflite');
+      debugPrint('Modelo cargado exitosamente');
 
       // Carga labels
       final labelsData =
           await DefaultAssetBundle.of(context).loadString('assets/labels.txt');
-      _labels = labelsData.split('\n');
+      _labels =
+          labelsData.split('\n').where((label) => label.isNotEmpty).toList();
+      debugPrint('Etiquetas cargadas: ${_labels.join(", ")}');
 
       if (mounted) {
         setState(() {
@@ -74,10 +88,13 @@ class _DetectionScreenState extends State<DetectionScreen>
           _detectionStatus = "Ready";
         });
       }
-    } catch (e) {
+    } catch (e, stackTrace) {
+      debugPrint('Error al cargar el modelo: $e');
+      debugPrint('Stack trace: $stackTrace');
+
       if (mounted) {
         setState(() {
-          _detectionStatus = "Failed to load model: $e";
+          _detectionStatus = "Error al cargar el modelo: $e";
         });
       }
     }
@@ -119,37 +136,51 @@ class _DetectionScreenState extends State<DetectionScreen>
       return;
     }
 
+    // Reducir la frecuencia de procesamiento
+    Timer? processingTimer;
     _cameraController!.startImageStream((CameraImage image) async {
       if (_isDetecting || !_modelLoaded) return;
 
+      // Procesar solo cada 500ms
+      if (processingTimer?.isActive ?? false) return;
+      processingTimer = Timer(const Duration(milliseconds: 500), () {});
+
       _isDetecting = true;
 
-      // Procesar la imagen y correr inferencia
-      final inputBuffer = await ImageProcessor.processImage(image);
-      if (inputBuffer != null) {
-        final outputBuffer = Float32List(_labels.length);
+      try {
+        // Procesar la imagen y correr inferencia
+        final inputBuffer = await ImageProcessor.processImage(image);
+        if (inputBuffer != null) {
+          final outputBuffer = Float32List(_labels.length);
 
-        // Ejecutar inferencia
-        _interpreter.run(inputBuffer.buffer, outputBuffer.buffer);
+          // Ejecutar inferencia
+          _interpreter.run(inputBuffer.buffer, outputBuffer.buffer);
 
-        // Procesar resultados
-        final results = List<Map<String, dynamic>>.generate(
-          _labels.length,
-          (index) => {
-            'label': _labels[index],
-            'confidence': outputBuffer[index],
-          },
-        );
+          // Procesar resultados
+          final results = List<Map<String, dynamic>>.generate(
+            _labels.length,
+            (index) => {
+              'label': _labels[index],
+              'confidence': outputBuffer[index],
+            },
+          );
 
-        if (mounted) {
-          setState(() {
-            _recognitions = results;
-            _updateDetectionStatus();
-          });
+          // Ordenar resultados por confianza
+          results.sort((a, b) =>
+              (b['confidence'] as double).compareTo(a['confidence'] as double));
+
+          if (mounted) {
+            setState(() {
+              _recognitions = results;
+              _updateDetectionStatus();
+            });
+          }
         }
+      } catch (e) {
+        debugPrint('Error en la detección: $e');
+      } finally {
+        _isDetecting = false;
       }
-
-      _isDetecting = false;
     });
   }
 
@@ -160,32 +191,33 @@ class _DetectionScreenState extends State<DetectionScreen>
       return;
     }
 
-    final highestConfidence = _recognitions!.reduce((curr, next) =>
-        (curr["confidence"] > next["confidence"]) ? curr : next);
-
+    final highestConfidence = _recognitions!.first;
     final label = highestConfidence["label"] as String;
-    final confidence =
-        (highestConfidence["confidence"] * 100).toStringAsFixed(1);
+    final confidence = highestConfidence["confidence"] as double;
 
     if (mounted) {
       setState(() {
         switch (label) {
           case "Awake":
-            _detectionStatus = "Awake";
+            _detectionStatus =
+                "Awake (${(confidence * 100).toStringAsFixed(1)}%)";
             _alertLevel = 0;
             break;
           case "Drowsy":
-            _detectionStatus = "Drowsy";
+            _detectionStatus =
+                "Drowsy (${(confidence * 100).toStringAsFixed(1)}%)";
             _alertLevel = 1;
             _triggerWarning();
             break;
           case "Yawning":
-            _detectionStatus = "Yawning";
+            _detectionStatus =
+                "Yawning (${(confidence * 100).toStringAsFixed(1)}%)";
             _alertLevel = 1;
             _triggerWarning();
             break;
           case "Eyes Closed":
-            _detectionStatus = "Eyes Closed";
+            _detectionStatus =
+                "Eyes Closed (${(confidence * 100).toStringAsFixed(1)}%)";
             _alertLevel = 2;
             _triggerAlert();
             break;
@@ -226,6 +258,129 @@ class _DetectionScreenState extends State<DetectionScreen>
     });
   }
 
+  @override
+  Widget build(BuildContext context) {
+    if (_cameraController == null || !_cameraController!.value.isInitialized) {
+      return const Scaffold(
+        body: Center(
+          child: CircularProgressIndicator(),
+        ),
+      );
+    }
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Detección de Somnolencia'),
+        backgroundColor: Colors.blue,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.person),
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (context) => const DriverProfileScreen(),
+                ),
+              );
+            },
+          ),
+          IconButton(
+            icon: const Icon(Icons.history),
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (context) => const DetectionHistoryScreen(),
+                ),
+              );
+            },
+          ),
+          IconButton(
+            icon: const Icon(Icons.emergency),
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (context) => const EmergencyDataScreen(),
+                ),
+              );
+            },
+          ),
+        ],
+      ),
+      body: Stack(
+        children: [
+          CameraPreview(_cameraController!),
+          if (_showAROverlay)
+            CustomPaint(
+              painter: AROverlayPainter(
+                alertLevel: _alertLevel,
+                recognitions: _recognitions,
+                screenSize: MediaQuery.of(context).size,
+              ),
+              size: Size.infinite,
+            ),
+          // Estado de detección en la parte inferior
+          Positioned(
+            bottom: 20,
+            left: 0,
+            right: 0,
+            child: Container(
+              padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 16),
+              color: Colors.black54,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    _detectionStatus,
+                    style: TextStyle(
+                      color: _getStatusColor(),
+                      fontSize: 24,
+                      fontWeight: FontWeight.bold,
+                    ),
+                    textAlign: TextAlign.center,
+                  ),
+                  if (_recognitions != null && _recognitions!.isNotEmpty) ...[
+                    const SizedBox(height: 4),
+                    ..._recognitions!.map((recognition) {
+                      final confidence =
+                          (recognition["confidence"] * 100).toStringAsFixed(1);
+                      return Text(
+                        '${recognition["label"]}: $confidence%',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 18,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      );
+                    }).toList(),
+                  ],
+                ],
+              ),
+            ),
+          ),
+          // Indicador de estado en la esquina superior derecha
+          Positioned(
+            top: MediaQuery.of(context).padding.top + 10,
+            right: 10,
+            child: Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: _getStatusColor().withOpacity(0.8),
+                shape: BoxShape.circle,
+              ),
+              child: Icon(
+                _getStatusIcon(),
+                color: Colors.white,
+                size: 24,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Color _getStatusColor() {
     switch (_alertLevel) {
       case 0:
@@ -250,49 +405,5 @@ class _DetectionScreenState extends State<DetectionScreen>
       default:
         return Icons.info;
     }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    if (_cameraController == null || !_cameraController!.value.isInitialized) {
-      return const Scaffold(
-        body: Center(
-          child: CircularProgressIndicator(),
-        ),
-      );
-    }
-
-    return Scaffold(
-      body: Stack(
-        children: [
-          CameraPreview(_cameraController!),
-          if (_showAROverlay)
-            CustomPaint(
-              painter: AROverlayPainter(
-                alertLevel: _alertLevel,
-                recognitions: _recognitions,
-              ),
-              size: Size.infinite,
-            ),
-          Positioned(
-            bottom: 20,
-            left: 0,
-            right: 0,
-            child: Container(
-              padding: const EdgeInsets.all(16),
-              color: Colors.black54,
-              child: Text(
-                _detectionStatus,
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 16,
-                ),
-                textAlign: TextAlign.center,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
   }
 }
